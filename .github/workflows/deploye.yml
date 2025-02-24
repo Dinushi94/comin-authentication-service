@@ -1,0 +1,68 @@
+name: Deploy to ECR and EC2 using OIDC
+
+on:
+  push:
+    branches:
+      - main # Trigger on pushes to the 'main' branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # Required for OIDC
+      contents: read
+
+    steps:
+      # Step 1: Checkout the code
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Step 2: Configure AWS credentials using OIDC
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }} # GitHub-Actions-ECR-Deploy-Role
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 3: Login to AWS ECR
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin 992382545225.dkr.ecr.us-west-2.amazonaws.com
+
+      # Step 4: Build and tag the Docker image
+      - name: Build and tag Docker image
+        run: |
+          docker build -t comin-leave-management:latest .
+          docker tag comin-leave-management:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/comin-leave-management-service:latest
+
+      # Step 5: Push the Docker image to ECR
+      - name: Push Docker image to ECR
+        run: |
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/comin-leave-management-service:latest
+
+      # Step 6: Deploy to EC2
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.EC2_HOST }} # Elastic IP or DNS of EC2 instance
+          username: ubuntu # SSH username for EC2
+          key: ${{ secrets.EC2_SSH_KEY }} # Private SSH key
+          script: |
+            # Login to AWS ECR
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+            # Pull the latest Docker image from ECR
+            docker pull ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/comin-leave-management-service:latest
+
+            # Stop and remove the existing container (if running)
+            docker stop comin-leave-management-service || true
+            docker rm comin-leave-management-service || true
+
+            # Run the new container
+            docker run -d -p 8080:8080 --name comin-leave-management-service 992382545225.dkr.ecr.us-west-2.amazonaws.com/comin-leave-management-service:latest
+
+            - name: Debug SSH Connection
+            run: |
+              ssh -o StrictHostKeyChecking=no -i <(echo "${{ secrets.EC2_SSH_KEY }}") ubuntu@${{ secrets.EC2_HOST }} "echo Connected Successfully"
+                
